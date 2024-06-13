@@ -191,7 +191,8 @@ class UiServer:
             from Debug import DebugReloader
             DebugReloader.watcher.stop()
 
-        self.server.socket.close()
+        for socket in self.server.sockets:
+            socket.stop()
         self.server.stop()
         self.running = False
         time.sleep(1)
