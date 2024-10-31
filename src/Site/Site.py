@@ -68,7 +68,7 @@ class Site(object):
         else:
             self.connection_server = FileServer()
 
-        self.announcer = SiteAnnouncer(self)  # Announce and get peer list from other nodes
+        self.announcer = SiteAnnouncer(self, main.dht_server)  # Announce and get peer list from other nodes
 
         if not self.settings.get("wrapper_key"):  # To auth websocket permissions
             self.settings["wrapper_key"] = CryptHash.random()

@@ -337,7 +337,7 @@ class FileServer(ConnectionServer):
             taken = time.time() - s
 
             # Query all trackers one-by-one in 20 minutes evenly distributed
-            sleep = max(0, 60 * 20 / len(config.trackers) - taken)
+            sleep = max(0, 60 * 20 / (len(config.trackers) + 1) - taken)
 
             self.log.debug("Site announce tracker done in %.3fs, sleeping for %.3fs..." % (taken, sleep))
             time.sleep(sleep)
