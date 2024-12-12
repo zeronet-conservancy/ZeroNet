@@ -394,7 +394,7 @@ class Config:
         self.parser.add_argument('--admin-pages', help='Pages with admin privileges', default=[], metavar='address', nargs='*')
         self.parser.add_argument('--dist-type', help='Type of installed distribution', default='source')
 
-        self.parser.add_argument('--size-limit', help='Default site size limit in MB', default=10, type=int, metavar='limit')
+        self.parser.add_argument('--size-limit', help='Default site size limit in MB', default=100, type=int, metavar='limit')
         self.parser.add_argument('--file-size-limit', help='Maximum per file size limit in MB', default=10, type=int, metavar='limit')
         self.parser.add_argument('--connected-limit', help='Max connected peer per site', default=8, type=int, metavar='connected_limit')
         self.parser.add_argument('--global-connected-limit', help='Max connections', default=512, type=int, metavar='global_connected_limit')
