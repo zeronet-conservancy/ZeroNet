@@ -75,22 +75,7 @@ class SiteManager(object):
                     del(self.sites[address])
                     self.log.debug("Removed site: %s" % address)
 
-            # Remove orpan sites from contentdb
-            content_db = ContentDb.getContentDb()
-            for row in content_db.execute("SELECT * FROM site").fetchall():
-                address = row["address"]
-                if address not in self.sites and address not in address_found:
-                    self.log.info("Deleting orphan site from content.db: %s" % address)
-
-                    try:
-                        content_db.execute("DELETE FROM site WHERE ?", {"address": address})
-                    except Exception as err:
-                        self.log.error("Can't delete site %s from content_db: %s" % (address, err))
-
-                    if address in content_db.site_ids:
-                        del content_db.site_ids[address]
-                    if address in content_db.sites:
-                        del content_db.sites[address]
+            # TODO
 
         self.loaded = True
         for address, settings in sites_need:

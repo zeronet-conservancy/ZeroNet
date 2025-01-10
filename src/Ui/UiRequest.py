@@ -51,21 +51,20 @@ class SecurityError(Exception):
 @PluginManager.acceptPlugins
 class UiRequest:
 
-    def __init__(self, server, env, start_response, is_data_request=False):
+    def __init__(self, server, env, start_response, is_data_request=False, script_nonce=None):
         if server:
             self.server = server
             self.log = server.log
         self.get = dict(urllib.parse.parse_qsl(env.get('QUERY_STRING', '')))
         self.env = env  # Enviroment settings
-        # ['CONTENT_LENGTH', 'CONTENT_TYPE', 'GATEWAY_INTERFACE', 'HTTP_ACCEPT', 'HTTP_ACCEPT_ENCODING', 'HTTP_ACCEPT_LANGUAGE',
-        #  'HTTP_COOKIE', 'HTTP_CACHE_CONTROL', 'HTTP_HOST', 'HTTP_HTTPS', 'HTTP_ORIGIN', 'HTTP_PROXY_CONNECTION', 'HTTP_REFERER',
-        #  'HTTP_USER_AGENT', 'PATH_INFO', 'QUERY_STRING', 'REMOTE_ADDR', 'REMOTE_PORT', 'REQUEST_METHOD', 'SCRIPT_NAME',
-        #  'SERVER_NAME', 'SERVER_PORT', 'SERVER_PROTOCOL', 'SERVER_SOFTWARE', 'werkzeug.request', 'wsgi.errors',
-        #  'wsgi.input', 'wsgi.multiprocess', 'wsgi.multithread', 'wsgi.run_once', 'wsgi.url_scheme', 'wsgi.version']
-
         self.start_response = start_response  # Start response function
         self.user = None
-        self.script_nonce = None  # Nonce for script tags in wrapper html
+        if is_data_request:
+            self.script_nonce = script_nonce
+            self.other_nonce = None
+        else:
+            self.other_nonce = script_nonce
+            self.script_nonce = None
         self.is_data_request = is_data_request
 
     def learnHost(self, host):
@@ -73,6 +72,9 @@ class UiRequest:
         self.server.log.info("Added %s as allowed host" % host)
 
     def isHostAllowed(self, host):
+        if config.debug_unsafe:
+            return True
+
         if host in self.server.allowed_hosts:
             return True
 
@@ -174,7 +176,7 @@ class UiRequest:
 
         if config.ui_check_cors and self.isCrossOriginRequest():
             # we are still exposed by answering on port
-            self.log.warning('Cross-origin request detected. Someone might be trying to analyze your 0net usage')
+            self.log.warning("Cross-origin request detected. Someone might be trying to analyze your 0net usage ((use `--debug-unsafe` and/or `--ui-ip-protect off` to ignore if you know what you're doing))")
             return []
 
         # Restict Ui access by ip
@@ -187,10 +189,10 @@ class UiRequest:
 
             http_get = self.env["PATH_INFO"]
             if self.env["QUERY_STRING"]:
-                http_get += "?{0}".format(self.env["QUERY_STRING"])
+                http_get += "?{self.env['QUERY_STRING']}"
             self_host = self.env["HTTP_HOST"].split(":")[0]
             self_ip = self.env["HTTP_HOST"].replace(self_host, socket.gethostbyname(self_host))
-            link = "http://{0}{1}".format(self_ip, http_get)
+            link = "http://{self_ip}{http_get}"
             ret_body = """
                 <h4>Start the client with <code>--ui_host "{host}"</code> argument</h4>
                 <h4>or access via ip: <a href="{link}">{link}</a></h4>
@@ -218,7 +220,10 @@ class UiRequest:
             else:
                 content_type = self.getContentType(path)
 
-            extra_headers = {"Access-Control-Allow-Origin": "null"}
+            if config.debug_unsafe:
+                extra_headers = {'Access-Control-Allow-Origin': '*'}
+            else:
+                extra_headers = {'Access-Control-Allow-Origin': 'null'}
 
             self.sendHeader(content_type=content_type, extra_headers=extra_headers, noscript=True)
             return ""
@@ -375,22 +380,31 @@ class UiRequest:
         headers["Keep-Alive"] = "max=25, timeout=30"
         headers["Referrer-Policy"] = "same-origin"
 
+        if config.debug_unsafe:
+            headers['Access-Control-Allow-Origin'] = '*'
+
         if noscript:
             headers["Content-Security-Policy"] = "default-src 'none'; sandbox allow-top-navigation allow-forms; img-src *; font-src * data:; media-src *; style-src * 'unsafe-inline';"
-        elif script_nonce:
+        else:
             host = self.getHostWithoutPort()
             port = int(self.env['SERVER_PORT'])
             if port == config.ui_port:
                 other_port = config.ui_site_port
-                frame_src = '*'
+                frame_src = f"'self' {host}:{other_port}"
             else:
                 other_port = config.ui_port
-                frame_src = 'self'
+                frame_src = "'self'"
+            script_src = "'self'"
+            if script_nonce:
+                script_src += f" 'nonce-{script_nonce}'"
+            if self.other_nonce:
+                script_src += f" 'nonce-{self.other_nonce}'"
+            if config.unsafe_inlines_csp:
+                script_src = "* 'unsafe-inline'"
+            headers["Content-Security-Policy"] = f"default-src 'none'; script-src {script_src}; img-src 'self' blob: data:; style-src 'self' blob: 'unsafe-inline'; connect-src {frame_src} {host}:{other_port} ws://{host}:{other_port}; frame-src {frame_src}"
 
-            headers["Content-Security-Policy"] = f"default-src 'none'; script-src 'nonce-{script_nonce}'; img-src 'self' blob: data:; style-src 'self' blob: 'unsafe-inline'; connect-src *; frame-src {frame_src}"
-
-        if allow_ajax:
-            headers["Access-Control-Allow-Origin"] = "null"
+        if allow_ajax and not config.debug_unsafe:
+            headers['Access-Control-Allow-Origin'] = 'null'
 
         if self.env["REQUEST_METHOD"] == "OPTIONS":
             # Allow json access
@@ -476,6 +490,8 @@ class UiRequest:
         if not extra_headers:
             extra_headers = {}
         script_nonce = self.getScriptNonce()
+
+        # currently 43110 nonce is allowed, but not 43111 one. should add 43111 nonce to 43110 serving iframe
 
         match = re.match(r"/(?P<address>[A-Za-z0-9\._-]+)(?P<inner_path>/.*|$)", path)
         just_added = False
@@ -694,11 +710,22 @@ class UiRequest:
         self.server.wrapper_nonces.append(wrapper_nonce)
         return wrapper_nonce
 
+    @staticmethod
+    def generateNonce():
+        return CryptHash.random(encoding="base64")
+
     def getScriptNonce(self):
         if not self.script_nonce:
-            self.script_nonce = CryptHash.random(encoding="base64")
+            self.script_nonce = UiRequest.generateNonce()
 
         return self.script_nonce
+
+    def maybeDataNonce(self):
+        """Returns addr and nonce for iframe if this is site request"""
+        site = self.getRequestSite()
+        if site and site != '/':
+            return site, self.generateNonce()
+        return None, None
 
     # Create a new wrapper nonce that allows to get one site
     def getAddNonce(self):
@@ -891,7 +918,9 @@ class UiRequest:
         return block
 
     # Stream a file to client
-    def actionFile(self, file_path, block_size=64 * 1024, send_header=True, header_length=True, header_noscript=False, header_allow_ajax=False, extra_headers={}, file_size=None, file_obj=None, path_parts=None):
+    def actionFile(self, file_path, block_size=64 * 1024, send_header=True, header_length=True, header_noscript=False, header_allow_ajax=False, extra_headers=None, file_size=None, file_obj=None, path_parts=None):
+        if extra_headers is None:
+            extra_headers = {}
         file_name = os.path.basename(file_path)
 
         if file_size is None:
@@ -928,7 +957,8 @@ class UiRequest:
                     status = 206
                 else:
                     status = 200
-                self.sendHeader(status, content_type=content_type, noscript=header_noscript, allow_ajax=header_allow_ajax, extra_headers=extra_headers)
+                script_nonce = self.getScriptNonce()
+                self.sendHeader(status, content_type=content_type, noscript=header_noscript, allow_ajax=header_allow_ajax, extra_headers=extra_headers, script_nonce=script_nonce)
             if self.env["REQUEST_METHOD"] != "OPTIONS":
                 if not file_obj:
                     file_obj = open(file_path, "rb")
@@ -962,19 +992,20 @@ class UiRequest:
             # Allow only same-origin websocket requests
             if origin:
                 origin_host = origin.split("://", 1)[-1]
-                if origin_host != host and origin_host not in self.server.allowed_ws_origins:
-                    error_message = "Invalid origin: %s (host: %s, allowed: %s)" % (origin, host, self.server.allowed_ws_origins)
+                if origin_host != host and origin_host not in self.server.allowed_ws_origins and not config.debug_unsafe:
+                    error_message = f"Invalid origin: {origin} (host: {host}, allowed: {self.server.allowed_ws_origins}) (use --debug-unsafe to ignore if you know what you're doing)"
                     ws.send(json.dumps({"error": error_message}))
                     return self.error403(error_message)
 
             # Find site by wrapper_key
-            wrapper_key = self.get["wrapper_key"]
+            wrapper_key = self.get.get("wrapper_key")
             site = None
-            for site_check in list(self.server.sites.values()):
-                if site_check.settings["wrapper_key"] == wrapper_key:
-                    site = site_check
+            if wrapper_key is not None:
+                for site_check in list(self.server.sites.values()):
+                    if site_check.settings["wrapper_key"] == wrapper_key:
+                        site = site_check
 
-            if site:  # Correct wrapper key
+            if site is not None:  # Correct wrapper key
                 try:
                     user = self.getCurrentUser()
                 except Exception as err:
@@ -993,6 +1024,13 @@ class UiRequest:
                     if ui_websocket in site_check.websockets:
                         site_check.websockets.remove(ui_websocket)
                 return [b"Bye."]
+            elif config.debug_unsafe:
+                site = self.server.sites[config.homepage]
+                user = self.getCurrentUser()
+                ui_websocket = UiWebsocket(ws, site, self.server, user, self)
+                self.server.websockets.append(ui_websocket)
+                ui_websocket.start()
+                self.server.websockets.remove(ui_websocket)
             else:  # No site found by wrapper key
                 ws.send(json.dumps({"error": "Wrapper key not found: %s" % wrapper_key}))
                 return self.error403("Wrapper key not found: %s" % wrapper_key)

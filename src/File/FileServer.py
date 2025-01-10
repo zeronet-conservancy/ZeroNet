@@ -70,6 +70,10 @@ class FileServer(ConnectionServer):
         self.last_request = time.time()
         self.files_parsing = {}
         self.ui_server = None
+        self.listeners = []
+
+    def addListener(self, listener):
+        self.listeners.append(listener)
 
     def getRandomPort(self, ip, port_range_from, port_range_to):
         self.log.info("Getting random port in range %s-%s..." % (port_range_from, port_range_to))
@@ -337,7 +341,7 @@ class FileServer(ConnectionServer):
             taken = time.time() - s
 
             # Query all trackers one-by-one in 20 minutes evenly distributed
-            sleep = max(0, 60 * 20 / len(config.trackers) - taken)
+            sleep = max(0, 60 * 20 / (len(config.trackers) + 1) - taken)
 
             self.log.debug("Site announce tracker done in %.3fs, sleeping for %.3fs..." % (taken, sleep))
             time.sleep(sleep)

@@ -5,7 +5,7 @@ import time
 import hashlib
 
 from collections.abc import Container
-from typing import Optional
+from typing import Optional, Union
 
 from util.Electrum import dbl_format
 from Config import config
@@ -105,7 +105,7 @@ def verify(*args, **kwargs):
     """Default verify, see verify64"""
     return verify64(*args, **kwargs)
 
-def verify64(data: str, addresses: str | Container[str], sign: str, lib_verify=None) -> bool:
+def verify64(data: str, addresses: Union[str, Container[str]], sign: str, lib_verify=None) -> bool:
     """Verify that sign is a valid signature for data by one of addresses
 
     Expecting signature to be in base64

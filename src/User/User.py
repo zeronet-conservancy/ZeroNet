@@ -1,6 +1,5 @@
 import logging
 import json
-import time
 import binascii
 
 import gevent
@@ -14,7 +13,8 @@ from Debug import Debug
 
 
 @PluginManager.acceptPlugins
-class User(object):
+class User:
+    """Represents user (which may have more than one key pair/nick/address)"""
     def __init__(self, master_address=None, master_seed=None, data={}):
         if master_seed:
             self.master_seed = master_seed
@@ -25,29 +25,72 @@ class User(object):
         else:
             self.master_seed = CryptBitcoin.newSeed()
             self.master_address = CryptBitcoin.privatekeyToAddress(self.master_seed)
-        self.sites = data.get("sites", {})
-        self.certs = data.get("certs", {})
+        self.accounts = self.loadAccounts(data)
+        self.sites = self.loadSites(data)
         self.settings = data.get("settings", {})
         self.delayed_save_thread = None
+        self.log = logging.getLogger(f"User:{self.master_address}")
 
-        self.log = logging.getLogger("User:%s" % self.master_address)
+    def loadSites(self, data):
+        """Load sites together with their user settings"""
+        sites = data.get('sites', {})
+        for address, site in sites.items():
+            if cert_issuer := site.get('cert'):
+                del site['cert']
+                if acc := self.getAccForCert(cert_issuer):
+                    site['account'] = acc['auth_address']
+        return sites
 
-    # Save to data/users.json
+    def getAccForCert(self, issuer):
+        """Get account associated with cert issuer
+
+        Note that this doesn't resolve among multiple possible accounts in any meaningful
+        way, so avoid using this in new code.
+        """
+        certs = [x for x in self.accounts if x['cert_issuer'] == issuer]
+        if certs:
+            return certs[0]
+        return None
+
+    def loadAccounts(self, data):
+        """Load accounts (key pairs)"""
+        certs_raw = data.get('certs')
+        accounts = data.get('accounts', [])
+        addrs = [acc['auth_address'] for acc in accounts]
+        ads = []
+        acs = []
+        for acc in accounts:
+            if acc['auth_address'] not in ads:
+                acs.append(acc)
+                ads.append(acc['auth_address'])
+        accounts = acs
+        if certs_raw:
+            accounts += [
+                {
+                    'cert_issuer': issuer,
+                    **acc,
+                }
+                for issuer, acc in certs_raw.items()
+                if acc['auth_address'] not in addrs
+            ]
+        return accounts
+
     @util.Noparallel(queue=True, ignore_class=True)
     def save(self):
+        """Save to data/private/users.json"""
         users_json = config.private_dir / 'users.json'
-        s = time.time()
         users = json.load(open(users_json))
         if self.master_address not in users:
             users[self.master_address] = {}  # Create if not exist
         user_data = users[self.master_address]
         if self.master_seed:
-            user_data["master_seed"] = self.master_seed
-        user_data["sites"] = self.sites
-        user_data["certs"] = self.certs
-        user_data["settings"] = self.settings
+            user_data['master_seed'] = self.master_seed
+        if 'certs' in user_data:
+            del user_data['certs']
+        user_data['sites'] = self.sites
+        user_data['accounts'] = self.accounts
+        user_data['settings'] = self.settings
         helper.atomicWrite(users_json, helper.jsonDumps(users).encode("utf8"))
-        self.log.debug("Saved in %.3fs" % (time.time() - s))
         self.delayed_save_thread = None
 
     def saveDelayed(self):
@@ -59,7 +102,6 @@ class User(object):
 
     @util.Noparallel()
     def generateAuthAddress(self, address):
-        s = time.time()
         address_id = self.getAddressAuthIndex(address)  # Convert site address to int
         auth_privatekey = CryptBitcoin.hdPrivatekey(self.master_seed, address_id)
         self.sites[address] = {
@@ -67,12 +109,14 @@ class User(object):
             "auth_privatekey": auth_privatekey
         }
         self.saveDelayed()
-        self.log.debug("Added new site: %s in %.3fs" % (address, time.time() - s))
         return self.sites[address]
 
-    # Get user site data
-    # Return: {"auth_address": "xxx", "auth_privatekey": "xxx"}
     def getSiteData(self, address, create=True):
+        """Get user site data
+
+        Returns {"auth_address": "xxx", "auth_privatekey": "xxx", ...}
+        Never returns None
+        """
         if address not in self.sites:  # Generate new BIP32 child key based on site address
             if not create:
                 return {"auth_address": None, "auth_privatekey": None}  # Dont create user yet
@@ -122,56 +166,57 @@ class User(object):
         else:
             return self.getSiteData(address, create)["auth_privatekey"]
 
-    # Add cert for the user
     def addCert(self, auth_address, domain, auth_type, auth_user_name, cert_sign):
+        """Add cert for the user"""
         # Find privatekey by auth address
-        auth_privatekey = [site["auth_privatekey"] for site in list(self.sites.values()) if site["auth_address"] == auth_address][0]
-        cert_node = {
+        auth_privatekey = [site['auth_privatekey'] for site in self.sites.values() if site['auth_address'] == auth_address][0]
+        cert = {
+            'cert_issuer': domain,
             "auth_address": auth_address,
             "auth_privatekey": auth_privatekey,
             "auth_type": auth_type,
             "auth_user_name": auth_user_name,
             "cert_sign": cert_sign
         }
-        # Check if we have already cert for that domain and its not the same
-        if self.certs.get(domain) and self.certs[domain] != cert_node:
-            return False
-        elif self.certs.get(domain) == cert_node:  # Same, not updated
+        if cert in self.accounts:
             return None
-        else:  # Not exist yet, add
-            self.certs[domain] = cert_node
+        else:
+            self.accounts.push(cert)
             self.save()
             return True
 
-    # Remove cert from user
-    def deleteCert(self, domain):
-        del self.certs[domain]
-
-    # Set active cert for a site
     def setCert(self, address, domain):
+        """Set active cert for a site"""
+        self.log.warning('certSet called')
         site_data = self.getSiteData(address)
         if domain:
-            site_data["cert"] = domain
+            site_data['account'] = self.getAccForCert(domain)['auth_address']
         else:
             if "cert" in site_data:
                 del site_data["cert"]
         self.saveDelayed()
         return site_data
 
-    # Get cert for the site address
-    # Return: { "auth_address":.., "auth_privatekey":.., "auth_type": "web", "auth_user_name": "nofish", "cert_sign":.. } or None
     def getCert(self, address):
-        site_data = self.getSiteData(address, create=False)
-        if not site_data or "cert" not in site_data:
-            return None  # Site dont have cert
-        return self.certs.get(site_data["cert"])
+        """Get selected cert for the site address
 
-    # Get cert user name for the site address
-    # Return: user@certprovider.bit or None
-    def getCertUserId(self, address):
+        Returns { "auth_address":.., "auth_privatekey":.., "auth_type": "web", "auth_user_name": "nofish", "cert_sign":.. } or None
+        """
         site_data = self.getSiteData(address, create=False)
-        if not site_data or "cert" not in site_data:
-            return None  # Site dont have cert
-        cert = self.certs.get(site_data["cert"])
-        if cert:
-            return cert["auth_user_name"] + "@" + site_data["cert"]
+        acc = site_data.get('account')
+        if not acc:
+            return None
+        certs = [x for x in self.accounts if x['auth_address'] == acc]
+        if certs:
+            return certs[0]
+        return None
+
+    def getCertUserId(self, address):
+        """Get cert user name for the site address
+
+        Returns user@certprovider.bit or None
+        """
+        cert = self.getCert(address)
+        if not cert:
+            return None
+        return f"{cert['auth_user_name']}@{cert['cert_issuer']}"

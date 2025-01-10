@@ -19,7 +19,7 @@ if "_" not in locals():
 
 bigfile_sha512_cache = {}
 
-
+# TODO: NOPLUGIN
 @PluginManager.registerTo("UiWebsocket")
 class UiWebsocketPlugin(object):
     def __init__(self, *args, **kwargs):
@@ -148,9 +148,10 @@ class UiWebsocketPlugin(object):
             wheres["inner_path__like"] = filter_inner_path
 
         if address == "all":
-            join = "LEFT JOIN site USING (site_id)"
+            # join = "LEFT JOIN site USING (site_id)"
+            join = ""
         else:
-            wheres["site_id"] = content_db.site_ids[address]
+            wheres["address"] = address
             join = ""
 
         if wheres_raw:
@@ -186,7 +187,7 @@ class UiWebsocketPlugin(object):
 
     def actionOptionalFileInfo(self, to, inner_path):
         content_db = self.site.content_manager.contents.db
-        site_id = content_db.site_ids[self.site.address]
+        address = self.site.address
 
         # Update peer numbers if necessary
         if time.time() - content_db.time_peer_numbers_updated > 60 * 1 and time.time() - self.time_peer_numbers_updated > 60 * 5:
@@ -194,8 +195,8 @@ class UiWebsocketPlugin(object):
             self.time_peer_numbers_updated = time.time()
             gevent.spawn(self.updatePeerNumbers)
 
-        query = "SELECT * FROM file_optional WHERE site_id = :site_id AND inner_path = :inner_path LIMIT 1"
-        res = content_db.execute(query, {"site_id": site_id, "inner_path": inner_path})
+        query = "SELECT * FROM file_optional WHERE address = :address AND inner_path = :inner_path LIMIT 1"
+        res = content_db.execute(query, {"address": address, "inner_path": inner_path})
         row = next(res, None)
         if row:
             row = dict(row)
@@ -255,9 +256,15 @@ class UiWebsocketPlugin(object):
         site = self.server.sites[address]
 
         content_db = site.content_manager.contents.db
-        site_id = content_db.site_ids[site.address]
 
-        res = content_db.execute("SELECT * FROM file_optional WHERE ? LIMIT 1", {"site_id": site_id, "inner_path": inner_path, "is_downloaded": 1})
+        res = content_db.execute('''
+            SELECT * FROM file_optional
+            WHERE ? LIMIT 1
+        ''', {
+            'address': address,
+            'inner_path': inner_path,
+            'is_downloaded': 1,
+        })
         row = next(res, None)
 
         if not row:
@@ -267,7 +274,14 @@ class UiWebsocketPlugin(object):
         # if not removed:
         #    return self.response(to, {"error": "Not found in hash_id: %s" % row["hash_id"]})
 
-        content_db.execute("UPDATE file_optional SET is_downloaded = 0, is_pinned = 0, peer = peer - 1 WHERE ?", {"site_id": site_id, "inner_path": inner_path})
+        content_db.execute('''
+            UPDATE file_optional
+                SET is_downloaded = 0, is_pinned = 0, peer = peer - 1
+            WHERE ?
+        ''', {
+            'address': address,
+            'inner_path': inner_path,
+        })
 
         try:
             site.storage.delete(inner_path)
@@ -321,15 +335,17 @@ class UiWebsocketPlugin(object):
 
         site = self.server.sites[address]
         content_db = site.content_manager.contents.db
-        site_id = content_db.site_ids[address]
 
         if "optional_help" not in site.settings:
             site.settings["optional_help"] = {}
 
-        stats = content_db.execute(
-            "SELECT COUNT(*) AS num, SUM(size) AS size FROM file_optional WHERE site_id = :site_id AND inner_path LIKE :inner_path",
-            {"site_id": site_id, "inner_path": directory + "%"}
-        ).fetchone()
+        stats = content_db.execute('''
+            SELECT COUNT(*) AS num, SUM(size) AS size FROM file_optional
+            WHERE address = :address AND inner_path LIKE :inner_path
+        ''', {
+            'address': address,
+            'inner_path': f'{directory}%'
+        }).fetchone()
         stats = dict(stats)
 
         if not stats["size"]:

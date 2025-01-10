@@ -7,16 +7,22 @@ from Config import config
 
 
 class ContentDbDict(dict):
+    """Present ContentDb as dictionary. DEPRECATED
+
+    Trying to imitate dictionary is actually only confusing; if we really wanted to do this anyway,
+    there is no need to inherit from dict. Please avoid using this in new code.
+    """
     def __init__(self, site, *args, **kwargs):
         s = time.time()
         self.site = site
         self.cached_keys = []
         self.log = self.site.log
         self.db = ContentDb.getContentDb()
-        self.db_id = self.db.needSite(site)
+        self.address = site.address
         self.num_loaded = 0
         super(ContentDbDict, self).__init__(self.db.loadDbDict(site))  # Load keys from database
-        self.log.debug("ContentDb init: %.3fs, found files: %s, sites: %s" % (time.time() - s, len(self), len(self.db.site_ids)))
+        elapsed = time.time() - s
+        self.log.debug(f"ContentDb init: {elapsed:.3f}s, found files: {len(self)}, sites: {len(self.db.sites)}")
 
     def loadItem(self, key):
         try:
@@ -106,8 +112,9 @@ class ContentDbDict(dict):
             self.log.warning("Error loading %s: %s" % (key, err))
             return default
 
-    def execute(self, query, params={}):
-        params["site_id"] = self.db_id
+    def execute(self, query, params=None):
+        params = params or {}
+        params['address'] = self.address
         return self.db.execute(query, params)
 
 if __name__ == "__main__":

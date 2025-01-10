@@ -18,7 +18,7 @@ if "_" not in locals():
 
 
 @PluginManager.registerTo("SiteManager")
-class SiteManagerPlugin(object):
+class SiteManagerPlugin:
     def load(self, *args, **kwargs):
         global filter_storage
         super(SiteManagerPlugin, self).load(*args, **kwargs)
@@ -44,7 +44,7 @@ class SiteManagerPlugin(object):
 
 
 @PluginManager.registerTo("UiWebsocket")
-class UiWebsocketPlugin(object):
+class UiWebsocketPlugin:
     # Mute
     def cbMuteAdd(self, to, auth_address, cert_user_id, reason):
         filter_storage.file_content["mutes"][auth_address] = {
@@ -217,7 +217,7 @@ class SiteStoragePlugin(object):
         return super(SiteStoragePlugin, self).onUpdated(inner_path, file=file)
 
 @PluginManager.registerTo("Site")
-class SitePlugin(object):
+class SitePlugin:
     def needFile(self, inner_path, update=False, blocking=True, peer=None, priority=0):
         self.log.debug(f'needFile {inner_path}')
         matches = re.findall('/(1[A-Za-z0-9]{26,35})/', inner_path)
@@ -240,7 +240,7 @@ class FileRequestPlugin:
         return super(FileRequestPlugin, self).actionUpdate(params)
 
 @PluginManager.registerTo("UiRequest")
-class UiRequestPlugin(object):
+class UiRequestPlugin:
     def actionWrapper(self, path, extra_headers=None):
         match = re.match(r"/(?P<address>[A-Za-z0-9\._-]+)(?P<inner_path>/.*|$)", path)
         if not match:

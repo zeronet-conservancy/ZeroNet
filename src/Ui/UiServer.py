@@ -53,6 +53,7 @@ class UiWSGIHandler(WebSocketHandler):
 
 class UiServer:
     def __init__(self):
+        self.data_nonce = {}
         self.ip = config.ui_ip
         self.port = config.ui_port
         self.site_port = config.ui_site_port
@@ -97,7 +98,11 @@ class UiServer:
     # Handle WSGI request
     def handleRequest(self, env, start_response):
         path = bytes(env["PATH_INFO"], "raw-unicode-escape").decode("utf8")
-        ui_request = UiRequest(self, env, start_response, is_data_request=False)
+        nonce = UiRequest.generateNonce()
+        ui_request = UiRequest(self, env, start_response, is_data_request=False, script_nonce=nonce)
+        addr, nonce = ui_request.maybeDataNonce()
+        if addr:
+            self.data_nonce[addr] = nonce
         if config.debug:  # Let the exception catched by werkezung
             return ui_request.route(path)
         else:  # Catch and display the error

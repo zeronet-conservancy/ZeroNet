@@ -8,6 +8,8 @@ import time
 import logging
 import base64
 import json
+from pathlib import Path
+from numbers import Number
 
 import gevent
 
@@ -155,9 +157,15 @@ def unpackOnionAddress(packed):
     return base64.b32encode(packed[0:-2]).lower().decode() + ".onion", struct.unpack("H", packed[-2:])[0]
 
 
-# Get dir from file
-# Return: data/site/content.json -> data/site/
 def getDirname(path):
+    """Get dir from file
+
+    Return: data/site/content.json -> data/site/
+
+    DEPRECATED: just use Path everywhere
+    """
+    if isinstance(path, Path):
+        return path.parent
     if "/" in path:
         return path[:path.rfind("/") + 1].lstrip("/")
     else:
@@ -334,3 +342,21 @@ def openBrowser(agent):
             return subprocess.Popen([config.open_browser, url])
         except Exception as err:
             print(f"Error starting browser: {err}")
+
+
+def stringifyJsonTree(obj):
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, Number):
+        return obj
+    if isinstance(obj, dict):
+        return {
+            str(k): stringifyJsonTree(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [
+            stringifyJsonTree(x)
+            for x in obj
+        ]
+    return str(obj)

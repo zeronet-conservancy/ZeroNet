@@ -1,8 +1,12 @@
 import array
 import time
 
+class PeerHashfield:
+    """Contains information about hashes stored on a peer
 
-class PeerHashfield(object):
+    TODO: clean the code
+    """
+
     __slots__ = ("storage", "time_changed", "append", "remove", "tobytes", "frombytes", "__len__", "__iter__")
     def __init__(self):
         self.storage = self.createStorage()

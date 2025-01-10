@@ -99,8 +99,11 @@ class FileRequest(object):
                 taken_sent = self.connection.last_sent_time - self.connection.last_send_time
                 self.connection.cpu_time += taken - taken_sent
 
-    # Update a site file request
     def actionUpdate(self, params):
+        """Receive update of a site (content.json)"""
+        for listener in self.server.listeners:
+            listener.message(params)
+
         site = self.sites.get(params["site"])
         if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})

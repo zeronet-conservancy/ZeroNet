@@ -346,18 +346,25 @@ class Db(object):
 
         return changed_tables
 
-    # Update json file to db
-    # Return: True if matched
     def updateJson(self, file_path, file=None, cur=None):
-        if not file_path.startswith(self.db_dir):
-            return False  # Not from the db dir: Skipping
-        relative_path = file_path[len(self.db_dir):]  # File path realative to db file
+        """Update json file to db
+
+        If file is False, it means it was deleted (ugh)
+
+        Returns True if matched & updated, False otherwise
+        """
+        try:
+            relative_path = file_path.relative_to(self.db_dir)
+        except ValueError as err:
+            self.log.warning(f"updateJson encountered db not relative to db_dir: {file_path}, {self.db_dir}")
+            self.log.warning(err)
+            return False
 
         # Check if filename matches any of mappings in schema
         matched_maps = []
         for match, map_settings in self.schema["maps"].items():
             try:
-                if SafeRe.match(match, relative_path):
+                if SafeRe.match(match, str(relative_path)):
                     matched_maps.append(map_settings)
             except SafeRe.UnsafePatternError as err:
                 self.log.error(err)
@@ -368,18 +375,19 @@ class Db(object):
 
         # Load the json file
         try:
-            if file is None:  # Open file is not file object passed
-                file = open(file_path, "rb")
+            if file is None:
+                file = file_path.open('rb')
 
-            if file is False:  # File deleted
+            if file is False: # deleted file
                 data = {}
             else:
-                if file_path.endswith("json.gz"):
+                if file_path.name.endswith("json.gz"):
                     file = helper.limitedGzipFile(fileobj=file)
-
                 data = json.load(file)
         except Exception as err:
-            self.log.debug("Json file %s load error: %s" % (file_path, err))
+            self.log.exception(f"Json file {file_path} load error: {err}")
+            import traceback
+            traceback.print_exc()
             data = {}
 
         # No cursor specificed
@@ -389,7 +397,7 @@ class Db(object):
 
         # Row for current json file if required
         if not data or [dbmap for dbmap in matched_maps if "to_keyvalue" in dbmap or "to_table" in dbmap]:
-            json_row = cur.getJsonRow(relative_path)
+            json_row = cur.getJsonRow(str(relative_path))
 
         # Check matched mappings in schema
         for dbmap in matched_maps:
@@ -417,8 +425,9 @@ class Db(object):
 
             # Insert data to json table for easier joins
             if dbmap.get("to_json_table"):
-                directory, file_name = re.match("^(.*?)/*([^/]*)$", relative_path).groups()
-                data_json_row = dict(cur.getJsonRow(directory + "/" + dbmap.get("file_name", file_name)))
+                directory = relative_path.parent
+                file_name = relative_path.name
+                data_json_row = dict(cur.getJsonRow(str(directory / dbmap.get("file_name", file_name))))
                 changed = False
                 for key in dbmap["to_json_table"]:
                     if data.get(key) != data_json_row.get(key):

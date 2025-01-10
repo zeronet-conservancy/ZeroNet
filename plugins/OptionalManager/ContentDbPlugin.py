@@ -14,8 +14,15 @@ if "content_db" not in locals().keys():  # To keep between module reloads
     content_db = None
 
 
+# TODO: NOPLUGIN
 @PluginManager.registerTo("ContentDb")
-class ContentDbPlugin(object):
+class ContentDbPlugin:
+    """Part of OptionalManager plugin. DEPRECATED
+
+    Optional files are important feature that shouldn't be delegated to a plugin.
+    As it stands, this part of OptionalManager defines content.db related operations
+    """
+
     def __init__(self, *args, **kwargs):
         global content_db
         content_db = self
@@ -35,7 +42,7 @@ class ContentDbPlugin(object):
         schema["tables"]["file_optional"] = {
             "cols": [
                 ["file_id", "INTEGER PRIMARY KEY UNIQUE NOT NULL"],
-                ["site_id", "INTEGER REFERENCES site (site_id) ON DELETE CASCADE"],
+                ["address", "TEXT NOT NULL"],
                 ["inner_path", "TEXT"],
                 ["hash_id", "INTEGER"],
                 ["size", "INTEGER"],
@@ -48,10 +55,10 @@ class ContentDbPlugin(object):
                 ["time_accessed", "INTEGER DEFAULT 0"]
             ],
             "indexes": [
-                "CREATE UNIQUE INDEX file_optional_key ON file_optional (site_id, inner_path)",
+                "CREATE UNIQUE INDEX file_optional_key ON file_optional (address, inner_path)",
                 "CREATE INDEX is_downloaded ON file_optional (is_downloaded)"
             ],
-            "schema_changed": 11
+            "schema_changed": 12
         }
 
         return schema
@@ -73,23 +80,22 @@ class ContentDbPlugin(object):
         num = 0
         total = 0
         total_downloaded = 0
-        res = content_db.execute("SELECT site_id, inner_path, size, is_downloaded FROM file_optional")
+        res = content_db.execute("SELECT address, inner_path, size, is_downloaded FROM file_optional")
         site_sizes = collections.defaultdict(lambda: collections.defaultdict(int))
         for row in res:
-            self.optional_files[row["site_id"]][row["inner_path"][-8:]] = 1
+            # ??? what [-8:] refers to? do we only care about last 8 characters of inner_path? WHY?
+            self.optional_files[row['address']][row['inner_path'][-8:]] = 1
             num += 1
 
             # Update site size stats
-            site_sizes[row["site_id"]]["size_optional"] += row["size"]
-            if row["is_downloaded"]:
-                site_sizes[row["site_id"]]["optional_downloaded"] += row["size"]
+            site_sizes[row['address']]['size_optional'] += row['size']
+            if row['is_downloaded']:
+                site_sizes[row['address']]['optional_downloaded'] += row['size']
 
         # Site site size stats to sites.json settings
-        site_ids_reverse = {val: key for key, val in self.site_ids.items()}
-        for site_id, stats in site_sizes.items():
-            site_address = site_ids_reverse.get(site_id)
-            if not site_address or site_address not in self.sites:
-                self.log.error("Not found site_id: %s" % site_id)
+        for site_address, stats in site_sizes.items():
+            if site_address not in self.sites:
+                self.log.error(f"Not found site_address: {site_address}")
                 continue
             site = self.sites[site_address]
             site.settings["size_optional"] = stats["size_optional"]
@@ -112,18 +118,17 @@ class ContentDbPlugin(object):
             config.saveValue("optional_limit", limit_new)
             config.optional_limit = str(limit_new)
 
-    # Predicts if the file is optional
-    def isOptionalFile(self, site_id, inner_path):
-        return self.optional_files[site_id].get(inner_path[-8:])
+    def isOptionalFile(self, address, inner_path):
+        """Predicts if the file is optional"""
+        return self.optional_files[address].get(inner_path[-8:])
 
     # Fill file_optional table with optional files found in sites
     def fillTableFileOptional(self, site):
         s = time.time()
-        site_id = self.site_ids.get(site.address)
-        if not site_id:
-            return False
         cur = self.getCursor()
-        res = cur.execute("SELECT * FROM content WHERE size_files_optional > 0 AND site_id = %s" % site_id)
+        res = cur.execute("SELECT * FROM content WHERE size_files_optional > 0 AND ?", {
+            'address': site.address,
+        })
         num = 0
         for row in res.fetchall():
             content = site.content_manager.contents[row["inner_path"]]
@@ -139,9 +144,14 @@ class ContentDbPlugin(object):
         if not user:
             user = UserManager.user_manager.create()
         auth_address = user.getAuthAddress(site.address)
-        res = self.execute(
-            "UPDATE file_optional SET is_pinned = 1 WHERE site_id = :site_id AND inner_path LIKE :inner_path",
-            {"site_id": site_id, "inner_path": "%%/%s/%%" % auth_address}
+        res = self.execute('''
+            UPDATE file_optional
+                SET is_pinned = 1
+            WHERE address = :address AND inner_path LIKE :inner_path''',
+            {
+                'address': site.address,
+                'inner_path': f'%/{auth_address}/%'
+            }
         )
 
         self.log.debug(
@@ -155,8 +165,8 @@ class ContentDbPlugin(object):
             cur = self
 
         num = 0
-        site_id = self.site_ids[site.address]
         content_inner_dir = helper.getDirname(content_inner_path)
+        address = site.address
         for relative_inner_path, file in content.get("files_optional", {}).items():
             file_inner_path = content_inner_dir + relative_inner_path
             hash_id = int(file["sha512"][0:4], 16)
@@ -172,7 +182,7 @@ class ContentDbPlugin(object):
                 "hash_id": hash_id,
                 "size": int(file["size"])
             }, {
-                "site_id": site_id,
+                "address": address,
                 "inner_path": file_inner_path
             }, oninsert={
                 "time_added": int(time.time()),
@@ -181,12 +191,13 @@ class ContentDbPlugin(object):
                 "peer": is_downloaded,
                 "is_pinned": is_pinned
             })
-            self.optional_files[site_id][file_inner_path[-8:]] = 1
+            self.optional_files[address][file_inner_path[-8:]] = 1
             num += 1
 
         return num
 
     def setContent(self, site, inner_path, content, size=0):
+        address = site.address
         super(ContentDbPlugin, self).setContent(site, inner_path, content, size=size)
         old_content = site.content_manager.contents.get(inner_path, {})
         if (not self.need_filling or self.filled.get(site.address)) and ("files_optional" in content or "files_optional" in old_content):
@@ -198,19 +209,24 @@ class ContentDbPlugin(object):
                 content_inner_dir = helper.getDirname(inner_path)
                 deleted = [content_inner_dir + key for key in old_files if key not in new_files]
                 if deleted:
-                    site_id = self.site_ids[site.address]
-                    self.execute("DELETE FROM file_optional WHERE ?", {"site_id": site_id, "inner_path": deleted})
+                    self.execute('DELETE FROM file_optional WHERE ?', {
+                        'address': address,
+                        'inner_path': deleted,
+                    })
 
     def deleteContent(self, site, inner_path):
+        address = site.address
         content = site.content_manager.contents.get(inner_path)
         if content and "files_optional" in content:
-            site_id = self.site_ids[site.address]
             content_inner_dir = helper.getDirname(inner_path)
             optional_inner_paths = [
                 content_inner_dir + relative_inner_path
                 for relative_inner_path in content.get("files_optional", {}).keys()
             ]
-            self.execute("DELETE FROM file_optional WHERE ?", {"site_id": site_id, "inner_path": optional_inner_paths})
+            self.execute('DELETE FROM file_optional WHERE ?', {
+                'address': address,
+                'inner_path': optional_inner_paths
+            })
         super(ContentDbPlugin, self).deleteContent(site, inner_path)
 
     def updatePeerNumbers(self):
@@ -244,11 +260,9 @@ class ContentDbPlugin(object):
                 )
             )
 
-            site_id = self.site_ids[site.address]
-            if not site_id:
-                continue
-
-            res = self.execute("SELECT file_id, hash_id, peer FROM file_optional WHERE ?", {"site_id": site_id})
+            res = self.execute('SELECT file_id, hash_id, peer FROM file_optional WHERE ?', {
+                'address': site.address,
+            })
             updates = {}
             for row in res:
                 peer_num = peer_nums.get(row["hash_id"], 0)
@@ -333,14 +347,13 @@ class ContentDbPlugin(object):
         maxsize = config.optional_limit_exclude_minsize * 1024 * 1024
         query = "is_downloaded = 1 AND is_pinned = 0 AND size < %s" % maxsize
 
+        # TODO: add owned into contentdb instead of ugly queries
         # Don't delete optional files from owned sites
-        my_site_ids = []
-        for address, site in self.sites.items():
-            if site.settings["own"]:
-                my_site_ids.append(str(self.site_ids[address]))
+        my_sites = [address for address, site in self.sites.items() if site.settings['own']]
 
-        if my_site_ids:
-            query += " AND site_id NOT IN (%s)" % ", ".join(my_site_ids)
+        if my_sites:
+            raise NotImplementedError("owned site exclusion not implemented normally yet")
+            query += " AND address NOT IN (%s)" % ", ".join(my_sites)
         return query
 
     def getOptionalUsedBytes(self):
@@ -378,13 +391,12 @@ class ContentDbPlugin(object):
 
         self.updatePeerNumbers()
 
-        site_ids_reverse = {val: key for key, val in self.site_ids.items()}
         deleted_file_ids = []
         for row in self.queryDeletableFiles():
-            site_address = site_ids_reverse.get(row["site_id"])
+            site_address = row['address']
             site = self.sites.get(site_address)
             if not site:
-                self.log.error("No site found for id: %s" % row["site_id"])
+                self.log.error(f"No site found: {site_address}")
                 continue
             site.log.debug("Deleting %s %.3f MB left" % (row["inner_path"], float(need_delete) / 1024 / 1024))
             deleted_file_ids.append(row["file_id"])

@@ -21,9 +21,10 @@ global_stats = collections.defaultdict(lambda: collections.defaultdict(int))
 
 
 @PluginManager.acceptPlugins
-class SiteAnnouncer(object):
-    def __init__(self, site):
+class SiteAnnouncer:
+    def __init__(self, site, dht_server):
         self.site = site
+        self.dht_server = dht_server
         self.stats = {}
         self.fileserver_port = config.fileserver_port
         self.peer_id = self.site.connection_server.peer_id
@@ -79,7 +80,10 @@ class SiteAnnouncer(object):
         self.fileserver_port = config.fileserver_port
         self.time_last_announce = time.time()
 
-        trackers = self.getAnnouncingTrackers(mode)
+        if config.use_trackers:
+            trackers = self.getAnnouncingTrackers(mode)
+        else:
+            trackers = []
 
         if config.verbose:
             self.site.log.debug("Tracker announcing, trackers: %s" % trackers)
@@ -87,10 +91,11 @@ class SiteAnnouncer(object):
         errors = []
         slow = []
         s = time.time()
-        threads = []
+        greenlets = []
         num_announced = 0
 
-        for tracker in trackers:  # Start announce threads
+        # disable for now
+        for tracker in trackers:  # Start announce greenlets
             tracker_stats = global_stats[tracker]
             # Reduce the announce time for trackers that looks unreliable
             time_announce_allowed = time.time() - 60 * min(30, tracker_stats["num_error"])
@@ -99,15 +104,17 @@ class SiteAnnouncer(object):
                     self.site.log.debug("Tracker %s looks unreliable, announce skipped (error: %s)" % (tracker, tracker_stats["num_error"]))
                 continue
             thread = self.site.greenlet_manager.spawn(self.announceTracker, tracker, mode=mode)
-            threads.append(thread)
+            greenlets.append(thread)
             thread.tracker = tracker
+
+        self.announceDHT()
 
         time.sleep(0.01)
         self.updateWebsocket(trackers="announcing")
 
-        gevent.joinall(threads, timeout=20)  # Wait for announce finish
+        gevent.joinall(greenlets, timeout=20)  # Wait for announce finish
 
-        for thread in threads:
+        for thread in greenlets:
             if thread.value is None:
                 continue
             if thread.value is not False:
@@ -123,20 +130,20 @@ class SiteAnnouncer(object):
         # Save peers num
         self.site.settings["peers"] = len(self.site.peers)
 
-        if len(errors) < len(threads):  # At least one tracker finished
+        if len(errors) < len(greenlets):  # At least one tracker finished
             if len(trackers) == 1:
                 announced_to = trackers[0]
             else:
-                announced_to = "%s/%s trackers" % (num_announced, len(threads))
+                announced_to = "%s/%s trackers" % (num_announced, len(greenlets))
             if mode != "update" or config.verbose:
                 self.site.log.debug(
                     "Announced in mode %s to %s in %.3fs, errors: %s, slow: %s" %
                     (mode, announced_to, time.time() - s, errors, slow)
                 )
         else:
-            if len(threads) > 1:
-                self.site.log.error("Announce to %s trackers in %.3fs, failed" % (len(threads), time.time() - s))
-            if len(threads) == 1 and mode != "start":  # Move to next tracker
+            if len(greenlets) > 1:
+                self.site.log.error("Announce to %s trackers in %.3fs, failed" % (len(greenlets), time.time() - s))
+            if len(greenlets) == 1 and mode != "start":  # Move to next tracker
                 self.site.log.debug("Tracker failed, skipping to next one...")
                 self.site.greenlet_manager.spawnLater(1.0, self.announce, force=force, mode=mode, pex=pex)
 
@@ -173,7 +180,21 @@ class SiteAnnouncer(object):
         back["port"] = port
         return back
 
+    def announceDHT(self):
+        if self.dht_server is None:
+            return
+        peers = self.dht_server.announce(self.site.address_sha1)
+        self.site.log.info(f'DHT {self.site.address_sha1.hex()} got {peers=}')
+        for peer in peers:
+            self.site.addPeer(peer['addr'], peer['port'], 'dht')
+
     def announceTracker(self, tracker, mode="start", num_want=10):
+        """Announces site to tracker, receives site peers from it
+
+        returns False on error
+        returns None if announce is skipped
+        else returns time it took to announce
+        """
         s = time.time()
         address_parts = self.getAddressParts(tracker)
         if not address_parts:
@@ -187,8 +208,8 @@ class SiteAnnouncer(object):
         self.stats[tracker]["status"] = "announcing"
         self.stats[tracker]["time_request"] = time.time()
         global_stats[tracker]["time_request"] = time.time()
-        if config.verbose:
-            self.site.log.debug("Tracker announcing to %s (mode: %s)" % (tracker, mode))
+
+        self.site.log.debug("Tracker announcing to %s (mode: %s)" % (tracker, mode))
         if mode == "update":
             num_want = 10
         else:

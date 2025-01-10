@@ -8,6 +8,8 @@ import sys
 
 import gevent
 
+from pathlib import Path
+
 from Debug import Debug
 from Crypt import CryptHash
 from Crypt import CryptBitcoin
@@ -17,8 +19,8 @@ from util import Diff
 from util import SafeRe
 from Peer import PeerHashfield
 from .ContentDbDict import ContentDbDict
+from .Limits import applyLimitRules, updateLimitData
 from Plugin import PluginManager
-
 
 class VerifyError(Exception):
     pass
@@ -30,9 +32,14 @@ class SignError(Exception):
 
 @PluginManager.acceptPlugins
 class ContentManager:
-    """Manage site content verifying and other related stuff"""
+    """Manage site content verifying and other related stuff
 
+    A separate instance is created per site.
+    """
+
+    @staticmethod
     def loadBadCerts():
+        """Load list of certificates that are considered untrustworthy"""
         try:
             with open(f'{config.data_dir}/badcerts.json') as f:
                 return set(json.load(f))
@@ -49,14 +56,15 @@ class ContentManager:
         self.has_optional_files = False
 
     def addBadCert(self, sign):
+        """Add untrustworthy cert"""
         addr = CryptBitcoin.get_sign_address_64('compromised', sign)
         if addr:
             self.bad_certs.add(addr)
             with open(f'{config.data_dir}/badcerts.json', 'w') as f:
                 json.dump(list(self.bad_certs), f)
 
-    # Load all content.json files
     def loadContents(self):
+        """Load all content.json files"""
         if len(self.contents) == 0:
             self.log.info("ContentDb not initialized, load files from filesystem...")
             self.loadContent(add_bad_files=False, delete_removed_files=False)
@@ -85,34 +93,37 @@ class ContentManager:
                 del(deleted[relative_path_old])
         return list(deleted), renamed
 
-    # Load content.json to self.content
-    # Return: Changed files ["index.html", "data/messages.json"], Deleted files ["old.jpg"]
     def loadContent(self, content_inner_path="content.json", add_bad_files=True, delete_removed_files=True, load_includes=True, force=False):
-        content_inner_path = content_inner_path.strip("/")  # Remove / from beginning
+        """Load content.json to self.content
+
+        Returns: Changed files ["index.html", "data/messages.json"], Deleted files ["old.jpg"]
+        """
+        content_inner_path = content_inner_path.strip('/')
         old_content = self.contents.get(content_inner_path)
         content_path = self.site.storage.getPath(content_inner_path)
         content_dir = os.path.dirname(content_path)
         content_inner_dir = helper.getDirname(content_inner_path)
 
-        if os.path.isfile(content_path):
-            try:
-                new_content = self.site.storage.loadJson(content_inner_path)
-                # Check if file is newer than what we have
-                if not force and old_content and not self.site.settings.get("own"):
-                    new_ts = int(float(new_content.get('modified', 0)))
-                    old_ts = int(float(old_content.get('modified', 0)))
-                    if new_ts < old_ts:
-                        self.log.debug(f'got older version of {content_inner_path} ({new_ts} < {old_ts}), ignoring')
-                        return [], []
-                    elif new_ts == old_ts:
-                        self.log.debug(f'got same timestamp version of {content_inner_path} ({new_ts}), ignoring')
-                        return [], []
-            except Exception as err:
-                self.log.warning(f'{content_path} load error: {Debug.formatException(err)}')
-                return [], []
-        else:
-            self.log.debug(f'Content.json not exist: {content_path}')
-            return [], []  # Content.json not exist
+        if not content_path.is_file():
+            self.log.warning(f'Content.json not exist: {content_path}')
+            return [], []
+
+        try:
+            new_content = self.site.storage.loadJson(content_inner_path)
+            updateLimitData(self.site, new_content)
+            # Check if file is newer than what we have
+            if not force and old_content and not self.site.settings.get("own"):
+                new_ts = int(float(new_content.get('modified', 0)))
+                old_ts = int(float(old_content.get('modified', 0)))
+                if new_ts < old_ts:
+                    self.log.debug(f'got older version of {content_inner_path} ({new_ts} < {old_ts}), ignoring')
+                    return [], []
+                elif new_ts == old_ts:
+                    self.log.debug(f'got same timestamp version of {content_inner_path} ({new_ts}), ignoring')
+                    return [], []
+        except Exception as err:
+            self.log.warning(f'{content_path} load error: {Debug.formatException(err)}')
+            return [], []
 
         try:
             # Get the files where the sha512 changed
@@ -292,17 +303,13 @@ class ContentManager:
                     if include_deleted:
                         deleted += include_deleted  # Add changed files
 
-            # Save some memory
-            new_content["signs"] = None
-            if "cert_sign" in new_content:
-                new_content["cert_sign"] = None
-
             if new_content.get("files_optional"):
                 self.has_optional_files = True
             # Update the content
             self.contents[content_inner_path] = new_content
         except Exception as err:
-            self.log.warning("%s parse error: %s" % (content_inner_path, Debug.formatException(err)))
+            self.log.warning(f"{content_inner_path} parse error:")
+            self.log.warning(Debug.formatException(err))
             return [], []  # Content.json parse error
 
         # Add changed files to bad files
@@ -468,9 +475,19 @@ class ContentManager:
         # Not found
         return False
 
-    # Get rules for the file
-    # Return: The rules for the file or False if not allowed
     def getRules(self, inner_path, content=None):
+        """Get rules for a file"""
+        siteRules = self.getSiteRules(inner_path, content)
+        if config.nocert_everywhere:
+            if siteRules and siteRules.get('cert_signers'):
+                siteRules['cert_signers']['nocert'] = []
+        return applyLimitRules(siteRules)
+
+    def getSiteRules(self, inner_path, content=None):
+        """Get rules for the file from site information
+
+        Returns rules for the file or False if not allowed
+        """
         if not inner_path.endswith("content.json"):  # Find the files content.json first
             file_info = self.getFileInfo(inner_path)
             if not file_info:
@@ -498,9 +515,11 @@ class ContentManager:
     def isGoodCert(self, cert):
         return cert not in self.bad_certs
 
-    # Get rules for a user file
-    # Return: The rules of the file or False if not allowed
     def getUserContentRules(self, parent_content, inner_path, content):
+        """Get rules for a user file
+        
+        Returns: The rules of the file or False if not allowed
+        """
         user_contents = parent_content["user_contents"]
 
         # Delivered for directory
@@ -572,7 +591,8 @@ class ContentManager:
 
         # Accepted cert signers
         rules["cert_signers"] = user_contents.get("cert_signers", {})
-        rules["cert_signers_pattern"] = user_contents.get("cert_signers_pattern")
+        if pattern := user_contents.get("cert_signers_pattern"):
+            self.log.warning(f"Site has non-empty cert_signers_pattern: {pattern}. This is no longer supported and will be ignored. Please report this incident to site owner")
 
         if "signers" not in rules:
             rules["signers"] = []
@@ -612,10 +632,15 @@ class ContentManager:
         return diffs
 
     def hashFile(self, dir_inner_path, file_relative_path, optional=False):
-        back = {}
-        file_inner_path = dir_inner_path + "/" + file_relative_path
+        if not isinstance(dir_inner_path, Path):
+            dir_inner_path = Path(dir_inner_path)
+        if not isinstance(file_relative_path, Path):
+            file_relative_path = Path(file_relative_path)
 
+        back = {}
+        file_inner_path = dir_inner_path / file_relative_path
         file_path = self.site.storage.getPath(file_inner_path)
+
         file_size = os.path.getsize(file_path)
         sha512sum = CryptHash.sha512sum(file_path)  # Calculate sha512 sum of file
         if optional and not self.hashfield.hasHash(sha512sum):
@@ -625,18 +650,18 @@ class ContentManager:
         return back
 
     def isValidRelativePath(self, relative_path):
-        if ".." in relative_path.replace("\\", "/").split("/"):
+        if '..' in relative_path.parts:
             return False
-        elif len(relative_path) > 255:
+        elif len(str(relative_path)) > 255: # ???
             return False
-        elif relative_path[0] in ("/", "\\"):  # Starts with
+        elif relative_path.is_absolute():
             return False
-        elif relative_path[-1] in (".", " "):  # Ends with
+        elif relative_path.name == '' or relative_path.name[-1] == ' ':  # Ends with
             return False
-        elif re.match(r".*(^|/)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]|CONOUT\$|CONIN\$)(\.|/|$)", relative_path, re.IGNORECASE):  # Protected on Windows
+        elif re.match(r".*(^|/)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]|CONOUT\$|CONIN\$)(\.|/|$)", str(relative_path), re.IGNORECASE):  # Protected on Windows
             return False
         else:
-            return re.match(r"^[^\x00-\x1F\"*:<>?\\|]+$", relative_path)
+            return re.match(r"^[^\x00-\x1F\"*:<>?\\|]+$", str(relative_path))
 
     def sanitizePath(self, inner_path):
         return re.sub("[\x00-\x1F\"*:<>?\\|]", "", inner_path)
@@ -651,7 +676,9 @@ class ContentManager:
             self.log.error("- [ERROR] Only ascii encoded directories allowed: %s" % dir_inner_path)
 
         for file_relative_path in self.site.storage.walk(dir_inner_path, ignore_pattern):
-            file_name = helper.getFilename(file_relative_path)
+            file_name = file_relative_path.name
+            if file_name == '':
+                continue
 
             ignored = optional = False
             if file_name == "content.json":
@@ -661,9 +688,9 @@ class ContentManager:
             elif not self.isValidRelativePath(file_relative_path):
                 ignored = True
                 self.log.error("- [ERROR] Invalid filename: %s" % file_relative_path)
-            elif dir_inner_path == "" and db_inner_path and file_relative_path.startswith(db_inner_path):
+            elif dir_inner_path == "" and db_inner_path and file_relative_path == db_inner_path:
                 ignored = True
-            elif optional_pattern and SafeRe.match(optional_pattern, file_relative_path):
+            elif optional_pattern and SafeRe.match(optional_pattern, str(file_relative_path)):
                 optional = True
 
             if ignored:  # Ignore content.json, defined regexp and files starting with .
@@ -719,13 +746,13 @@ class ContentManager:
                     content[key] = val
                     self.log.info("Extending content.json with: %s" % key)
 
-        directory = helper.getDirname(self.site.storage.getPath(inner_path))
-        inner_directory = helper.getDirname(inner_path)
+        directory = self.site.storage.getPath(inner_path).parent
+        inner_directory = Path(helper.getDirname(inner_path))
         self.log.info("Opening site data directory: %s..." % directory)
 
         changed_files = [inner_path]
         files_node, files_optional_node = self.hashFiles(
-            helper.getDirname(inner_path), content.get("ignore"), content.get("optional")
+            Path(inner_path).parent, content.get("ignore"), content.get("optional")
         )
 
         if not remove_missing_optional:
@@ -740,7 +767,7 @@ class ContentManager:
             old_hash = content.get("files", {}).get(file_relative_path, {}).get("sha512")
             new_hash = files_merged[file_relative_path]["sha512"]
             if old_hash != new_hash:
-                changed_files.append(inner_directory + file_relative_path)
+                changed_files.append(inner_directory / Path(file_relative_path))
 
         self.log.debug("Changed files: %s" % changed_files)
         if update_changed_files:
@@ -791,6 +818,7 @@ class ContentManager:
         if "sign" in new_content:
             del(new_content["sign"])  # Delete old sign (backward compatibility)
 
+        new_content = helper.stringifyJsonTree(new_content)
         sign_content = json.dumps(new_content, sort_keys=True)
         sign = CryptBitcoin.sign(sign_content, privatekey)
         # new_content["signs"] = content.get("signs", {}) # TODO: Multisig
@@ -837,29 +865,40 @@ class ContentManager:
         return CryptBitcoin.verify(cert_subject, issuer_address, sign)
 
     def verifyCert(self, inner_path, content):
+        """Check if file is signed properly
+
+        returns True on success, False or throws VerifyError otherwise
+        """
         rules = self.getRules(inner_path, content)
 
         if not rules:
             raise VerifyError("No rules for this file")
 
-        if not rules.get("cert_signers") and not rules.get("cert_signers_pattern"):
+        if not rules.get("cert_signers"):
             return True  # Does not need cert
 
         if "cert_user_id" not in content:
             raise VerifyError("Missing cert_user_id")
 
-        if content["cert_user_id"].count("@") != 1:
-            raise VerifyError("Invalid domain in cert_user_id")
+        if content['cert_user_id'].count('@') != 1:
+            raise VerifyError(f"Invalid cert_user_id: {cert_user_id}")
 
-        name, domain = content["cert_user_id"].rsplit("@", 1)
+        name, domain = content['cert_user_id'].split('@')
         cert_address = rules["cert_signers"].get(domain)
         if not cert_address:  # Unknown Cert signer
-            if rules.get("cert_signers_pattern") and SafeRe.match(rules["cert_signers_pattern"], domain):
-                cert_address = domain
-            else:
-                raise VerifyError("Invalid cert signer: %s" % domain)
+            raise VerifyError(f"Invalid cert signer: {domain}")
+
+        if cert_address == "nocert":
+            return self.verifyNocert(name, rules['user_address'])
 
         return self.verifyCertSign(rules["user_address"], content["cert_auth_type"], name, cert_address, content["cert_sign"])
+
+    def verifyNocert(self, name, user_address):
+        """Verifies that user is allowed to post by local node rules"""
+        if user_address != name:
+            return False
+        limits = getUserLimits(user_address)
+        return not limits.blocked and limits.size > 0
 
     # Checks if the content.json content is valid
     # Return: True or False
@@ -905,6 +944,7 @@ class ContentManager:
 
         # Verify valid filenames
         for file_relative_path in list(content.get("files", {}).keys()) + list(content.get("files_optional", {}).keys()):
+            file_relative_path = Path(file_relative_path)
             if not self.isValidRelativePath(file_relative_path):
                 raise VerifyError("Invalid relative path: %s" % file_relative_path)
 
@@ -922,7 +962,7 @@ class ContentManager:
 
     def verifyContentInclude(self, inner_path, content, content_size, content_size_optional):
         # Load include details
-        rules = self.getRules(inner_path, content)
+        rules = applyLimitRules(self.getRules(inner_path, content))
         if not rules:
             raise VerifyError("No rules")
 

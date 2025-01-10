@@ -17,9 +17,9 @@ if config.use_tempfiles:
     import tempfile
 
 
-# Communicate remote peers
 @PluginManager.acceptPlugins
-class Peer(object):
+class Peer:
+    """Represents remote peer"""
     __slots__ = (
         "ip", "port", "site", "key", "connection", "connection_server", "time_found", "time_response", "time_hashfield",
         "time_added", "has_hashfield", "is_tracker_connection", "time_my_hashfield_sent", "last_ping", "reputation",

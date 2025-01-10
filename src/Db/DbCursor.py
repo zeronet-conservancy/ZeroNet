@@ -169,7 +169,7 @@ class DbCursor:
         )
         if res.rowcount == 0:
             params.update(oninsert)  # Add insert-only fields
-            self.execute("INSERT INTO %s ?" % table, params)
+            self.execute(f'INSERT INTO {table} ?', params)
 
     # Create new table
     # Return: True on success

@@ -142,7 +142,8 @@ def init():
     # Debug dependent configuration
     from Debug import DebugHook
 
-    load_plugins()
+    if not config.no_plugins:
+        load_plugins()
 
     # Log current config
     logging.debug("Config: %s" % config)

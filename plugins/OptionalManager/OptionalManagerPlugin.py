@@ -28,12 +28,16 @@ def processAccessLog():
         access_log = collections.defaultdict(dict)
         now = int(time.time())
         num = 0
-        for site_id in access_log_prev:
-            content_db.execute(
-                "UPDATE file_optional SET time_accessed = %s WHERE ?" % now,
-                {"site_id": site_id, "inner_path": list(access_log_prev[site_id].keys())}
-            )
-            num += len(access_log_prev[site_id])
+        for address in access_log_prev:
+            content_db.execute('''
+                UPDATE file_optional SET time_accessed = :now
+                WHERE address = :address AND inner_path = :inner_path
+            ''', {
+                'address': address,
+                'inner_path': list(access_log_prev[address].keys()),
+                'now': now,
+            })
+            num += len(access_log_prev[address])
 
         content_db.log.debug("Inserted %s web request stat in %.3fs" % (num, time.time() - s))
 
@@ -47,21 +51,21 @@ def processRequestLog():
 
         s = time.time()
         request_log_prev = request_log
-        request_log = collections.defaultdict(lambda: collections.defaultdict(int))  # {site_id: {inner_path1: 1, inner_path2: 1...}}
+        request_log = collections.defaultdict(lambda: collections.defaultdict(int))  # {address: {inner_path1: 1, inner_path2: 1...}}
         num = 0
-        for site_id in request_log_prev:
-            for inner_path, uploaded in request_log_prev[site_id].items():
+        for address in request_log_prev:
+            for inner_path, uploaded in request_log_prev[address].items():
                 content_db.execute(
                     "UPDATE file_optional SET uploaded = uploaded + %s WHERE ?" % uploaded,
-                    {"site_id": site_id, "inner_path": inner_path}
+                    { 'address': address, 'inner_path': inner_path }
                 )
                 num += 1
         content_db.log.debug("Inserted %s file request stat in %.3fs" % (num, time.time() - s))
 
 
 if "access_log" not in locals().keys():  # To keep between module reloads
-    access_log = collections.defaultdict(dict)  # {site_id: {inner_path1: 1, inner_path2: 1...}}
-    request_log = collections.defaultdict(lambda: collections.defaultdict(int))  # {site_id: {inner_path1: 1, inner_path2: 1...}}
+    access_log = collections.defaultdict(dict)  # {address: {inner_path1: 1, inner_path2: 1...}}
+    request_log = collections.defaultdict(lambda: collections.defaultdict(int))  # {address: {inner_path1: 1, inner_path2: 1...}}
     helper.timer(61, processAccessLog)
     helper.timer(60, processRequestLog)
 
@@ -78,18 +82,27 @@ class ContentManagerPlugin(object):
         else:
             file_inner_path = inner_path
 
-        self.contents.db.executeDelayed(
-            "UPDATE file_optional SET time_downloaded = :now, is_downloaded = 1, peer = peer + 1 WHERE site_id = :site_id AND inner_path = :inner_path AND is_downloaded = 0",
-            {"now": int(time.time()), "site_id": self.contents.db.site_ids[self.site.address], "inner_path": file_inner_path}
-        )
+        self.contents.db.executeDelayed('''
+            UPDATE file_optional
+                SET time_downloaded = :now, is_downloaded = 1, peer = peer + 1
+            WHERE address = :address AND inner_path = :inner_path AND is_downloaded = 0
+        ''', {
+            'now': int(time.time()),
+            'address': self.site.address,
+            'inner_path': file_inner_path,
+        })
 
         return super(ContentManagerPlugin, self).optionalDownloaded(inner_path, hash_id, size, own)
 
     def optionalRemoved(self, inner_path, hash_id, size=None):
-        res = self.contents.db.execute(
-            "UPDATE file_optional SET is_downloaded = 0, is_pinned = 0, peer = peer - 1 WHERE site_id = :site_id AND inner_path = :inner_path AND is_downloaded = 1",
-            {"site_id": self.contents.db.site_ids[self.site.address], "inner_path": inner_path}
-        )
+        res = self.contents.db.execute('''
+            UPDATE file_optional
+                SET is_downloaded = 0, is_pinned = 0, peer = peer - 1
+            WHERE address = :address AND inner_path = :inner_path AND is_downloaded = 1
+        ''', {
+            'address': self.site.address,
+            'inner_path': inner_path,
+        })
 
         if res.rowcount > 0:
             back = super(ContentManagerPlugin, self).optionalRemoved(inner_path, hash_id, size)
@@ -104,10 +117,15 @@ class ContentManagerPlugin(object):
     def optionalRenamed(self, inner_path_old, inner_path_new):
         back = super(ContentManagerPlugin, self).optionalRenamed(inner_path_old, inner_path_new)
         self.cache_is_pinned = {}
-        self.contents.db.execute(
-            "UPDATE file_optional SET inner_path = :inner_path_new WHERE site_id = :site_id AND inner_path = :inner_path_old",
-            {"site_id": self.contents.db.site_ids[self.site.address], "inner_path_old": inner_path_old, "inner_path_new": inner_path_new}
-        )
+        self.contents.db.execute('''
+            UPDATE file_optional
+                SET inner_path = :inner_path_new
+            WHERE address = :address_id AND inner_path = :inner_path_old
+        ''', {
+            'address': self.site.address,
+            'inner_path_old': inner_path_old,
+            'inner_path_new': inner_path_new,
+        })
         return back
 
     def isDownloaded(self, inner_path=None, hash_id=None, force_check_db=False):
@@ -115,15 +133,21 @@ class ContentManagerPlugin(object):
             return False
 
         if inner_path:
-            res = self.contents.db.execute(
-                "SELECT is_downloaded FROM file_optional WHERE site_id = :site_id AND inner_path = :inner_path LIMIT 1",
-                {"site_id": self.contents.db.site_ids[self.site.address], "inner_path": inner_path}
-            )
+            res = self.contents.db.execute('''
+                SELECT is_downloaded FROM file_optional
+                WHERE ? LIMIT 1
+            ''', {
+                'address': self.site.address,
+                'inner_path': inner_path,
+            })
         else:
-            res = self.contents.db.execute(
-                "SELECT is_downloaded FROM file_optional WHERE site_id = :site_id AND hash_id = :hash_id AND is_downloaded = 1 LIMIT 1",
-                {"site_id": self.contents.db.site_ids[self.site.address], "hash_id": hash_id}
-            )
+            res = self.contents.db.execute('''
+                SELECT is_downloaded FROM file_optional
+                WHERE ? AND is_downloaded = 1 LIMIT 1
+            ''', {
+                'address': self.site.address,
+                'hash_id': hash_id,
+            })
         row = res.fetchone()
         if row and row["is_downloaded"]:
             return True
@@ -135,10 +159,13 @@ class ContentManagerPlugin(object):
             self.site.log.debug("Cached is pinned: %s" % inner_path)
             return self.cache_is_pinned[inner_path]
 
-        res = self.contents.db.execute(
-            "SELECT is_pinned FROM file_optional WHERE site_id = :site_id AND inner_path = :inner_path LIMIT 1",
-            {"site_id": self.contents.db.site_ids[self.site.address], "inner_path": inner_path}
-        )
+        res = self.contents.db.execute('''
+            SELECT is_pinned FROM file_optional
+            WHERE ? LIMIT 1",
+        ''', {
+            'address': self.site.address,
+            'inner_path': inner_path,
+        })
         row = res.fetchone()
 
         if row and row[0]:
@@ -153,8 +180,15 @@ class ContentManagerPlugin(object):
 
     def setPin(self, inner_path, is_pinned):
         content_db = self.contents.db
-        site_id = content_db.site_ids[self.site.address]
-        content_db.execute("UPDATE file_optional SET is_pinned = %d WHERE ?" % is_pinned, {"site_id": site_id, "inner_path": inner_path})
+        address = self.site.address
+        content_db.execute('''
+            UPDATE file_optional
+                SET is_pinned = :is_pinned
+            WHERE address = :address AND inner_path = :inner_path
+        ''', {
+            'address': address,
+            'inner_path': inner_path,
+        })
         self.cache_is_pinned = {}
 
     def optionalDelete(self, inner_path):
@@ -180,10 +214,9 @@ class UiRequestPlugin(object):
         global access_log
         path_parts = super(UiRequestPlugin, self).parsePath(path)
         if path_parts:
-            site_id = ContentDbPlugin.content_db.site_ids.get(path_parts["request_address"])
-            if site_id:
-                if ContentDbPlugin.content_db.isOptionalFile(site_id, path_parts["inner_path"]):
-                    access_log[site_id][path_parts["inner_path"]] = 1
+            address = path_parts['request_address']
+            if ContentDbPlugin.content_db.isOptionalFile(address, path_parts['inner_path']):
+                access_log[address][path_parts['inner_path']] = 1
         return path_parts
 
 
@@ -203,9 +236,8 @@ class FileRequestPlugin(object):
         if not stats:
             # Only track the last request of files
             return False
-        site_id = ContentDbPlugin.content_db.site_ids[site_address]
-        if site_id and ContentDbPlugin.content_db.isOptionalFile(site_id, inner_path):
-            request_log[site_id][inner_path] += stats["bytes_sent"]
+        if ContentDbPlugin.content_db.isOptionalFile(address, inner_path):
+            request_log[address][inner_path] += stats['bytes_sent']
 
 
 @PluginManager.registerTo("Site")

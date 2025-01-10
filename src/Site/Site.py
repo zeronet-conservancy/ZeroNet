@@ -30,8 +30,8 @@ from . import SiteManager
 
 
 @PluginManager.acceptPlugins
-class Site(object):
-
+class Site:
+    """Representation of a 0net site"""
     def __init__(self, address, allow_create=True, settings=None):
         self.address = str(re.sub("[^A-Za-z0-9]", "", address))  # Make sure its correct address
         self.address_hash = hashlib.sha256(self.address.encode("ascii")).digest()
@@ -68,7 +68,7 @@ class Site(object):
         else:
             self.connection_server = FileServer()
 
-        self.announcer = SiteAnnouncer(self)  # Announce and get peer list from other nodes
+        self.announcer = SiteAnnouncer(self, main.dht_server)  # Announce and get peer list from other nodes
 
         if not self.settings.get("wrapper_key"):  # To auth websocket permissions
             self.settings["wrapper_key"] = CryptHash.random()
@@ -782,8 +782,8 @@ class Site(object):
             file_info = self.content_manager.getFileInfo(inner_path)
         return file_info
 
-    # Check and download if file not exist
     def needFile(self, inner_path, update=False, blocking=True, peer=None, priority=0):
+        """Check and download if file not exist"""
         if self.worker_manager.tasks.findTask(inner_path):
             task = self.worker_manager.addTask(inner_path, peer, priority=priority)
             if blocking:
